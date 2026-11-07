@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Board Camera</title>
+<style>
+  :root {
+    --ok: #34c759;
+    --warn: #ffcc00;
+    --bad: #ff453a;
+    --ink: #ffffff;
+    --dim: rgba(0, 0, 0, 0.55);
+    --panel: rgba(20, 20, 22, 0.92);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--ink);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  video, #still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #still { object-fit: contain; background: #000; }
+  /* Dimmed area outside the frame */
+  #mask { position: absolute; inset: 0; pointer-events: none; }
+  /* Corner brackets */
+  .corner { position: absolute; width: 44px; height: 44px; border: 5px solid var(--ink); pointer-events: none; transition: border-color .2s; }
+  .tl { border-right: 0; border-bottom: 0; border-top-left-radius: 22px; }
+  .tr { border-left: 0; border-bottom: 0; border-top-right-radius: 22px; }
+  .bl { border-right: 0; border-top: 0; border-bottom-left-radius: 22px; }
+  .br { border-left: 0; border-top: 0; border-bottom-right-radius: 22px; }
+  .sharp .corner { border-color: var(--ok); }
+  #top { position: absolute; left: 0; right: 0; top: 0; padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px 12px;
+    text-align: center; background: linear-gradient(rgba(0,0,0,.7), transparent); }
+  #label { font-weight: 600; font-size: 16px; }
+  #hint { font-size: 14px; opacity: .9; margin-top: 2px; }
+  #bottom { position: absolute; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(env(safe-area-inset-bottom, 0px) + 20px);
+    display: flex; flex-direction: column; align-items: center; gap: 12px; background: linear-gradient(transparent, rgba(0,0,0,.75)); }
+  #status { font-size: 14px; font-weight: 600; padding: 6px 12px; border-radius: 999px; background: var(--panel); }
+  #status.ok { color: var(--ok); } #status.warn { color: var(--warn); } #status.bad { color: var(--bad); }
+  #controls { display: flex; align-items: center; justify-content: center; gap: 36px; width: 100%; }
+  #shutter { width: 76px; height: 76px; border-radius: 50%; border: 5px solid #fff; background: #fff; padding: 0;
+    box-shadow: inset 0 0 0 4px #000; cursor: pointer; transition: opacity .2s, transform .1s; }
+  #shutter:disabled { opacity: .35; cursor: not-allowed; }
+  #shutter:active:not(:disabled) { transform: scale(.94); }
+  .round { width: 48px; height: 48px; border-radius: 50%; border: 0; background: var(--panel); color: #fff; font-size: 20px; cursor: pointer; }
+  .round[hidden] { display: inline-block; visibility: hidden; }
+  #review { position: absolute; inset: 0; display: none; }
+  #review.on { display: block; }
+  #reviewBar { position: absolute; left: 0; right: 0; bottom: 0; padding: 16px 16px calc(env(safe-area-inset-bottom, 0px) + 20px);
+    background: var(--panel); display: grid; gap: 12px; }
+  #result { text-align: center; font-weight: 600; min-height: 22px; }
+  #result.ok { color: var(--ok); } #result.bad { color: var(--bad); }
+  .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .btn { height: 52px; border-radius: 12px; border: 0; font: 600 16px/1 inherit; cursor: pointer; }
+  .btn.primary { background: #0a84ff; color: #fff; } .btn.secondary { background: #3a3a3c; color: #fff; }
+  .btn:disabled { opacity: .5; }
+  #error { position: absolute; inset: 0; display: none; place-items: center; text-align: center; padding: 24px; background: #000; }
+  #error.on { display: grid; }
+  button:focus-visible { outline: 3px solid #0a84ff; outline-offset: 3px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="mask"></canvas>
+  <div id="frame">
+    <div class="corner tl"></div><div class="corner tr"></div>
+    <div class="corner bl"></div><div class="corner br"></div>
+  </div>
+
+  <div id="top">
+    <div id="label">Board photo</div>
+    <div id="hint">Fit the whole 8×4 ft board inside the corners. Step back about 3 m.</div>
+  </div>
+
+  <div id="bottom">
+    <div id="status" class="warn">Starting camera…</div>
+    <div id="controls">
+      <button class="round" id="torch" hidden aria-label="Torch">🔦</button>
+      <button id="shutter" disabled aria-label="Take photo"></button>
+      <span class="round" style="visibility:hidden"></span>
+    </div>
+  </div>
+
+  <div id="review">
+    <img id="still" alt="Captured board photo">
+    <div id="reviewBar">
+      <div id="result">Check that all 4 corners of the board are in the photo.</div>
+      <div class="btns">
+        <button class="btn secondary" id="retake">Retake</button>
+        <button class="btn primary" id="use">Use photo</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="error"><div id="errorText"></div></div>
+</div>
+
+<script>
+/* ===== Settings — fill these in after deploying the Apps Script web app ===== */
+const ENDPOINT = 'https://script.google.com/macros/s/AKfycbwC38w6JqkZ3E_WYSGH1uL-kE-n9XQXEZSzbzuzKq062ll5aoVmzzLuGrrPxyYKlJzcow/exec';
+const TOKEN = 'mdepot-board-7Kq92xLp';
+/* Board shape: 4 ft wide × 8 ft tall when held in portrait. */
+const BOARD_W = 4, BOARD_H = 8;
+/* Sharpness threshold (higher = stricter). Tune after testing in the stores. */
+const SHARP_MIN = 18;
+/* ========================================================================== */
+
+const params = new URLSearchParams(location.search);
+const rowId = params.get('id') || '';
+const label = params.get('label') || '';
+const back = params.get('back') || '';
+
+const $ = (id) => document.getElementById(id);
+const video = $('video'), mask = $('mask'), frame = $('frame');
+const statusEl = $('status'), shutter = $('shutter');
+let stream = null, track = null, frameRect = null, sharpStreak = 0, captured = null;
+
+if (label) $('label').textContent = label;
+
+function fail(msg) { $('errorText').innerHTML = msg; $('error').classList.add('on'); }
+if (!rowId) fail('This page must be opened from the app’s <b>Take board photo</b> button.');
+
+/* --- Layout the 1:2 frame and dim everything outside it --- */
+function layout() {
+  const W = innerWidth, H = innerHeight;
+  const topPad = 110, bottomPad = 190;
+  const availH = H - topPad - bottomPad, availW = W * 0.9;
+  let fh = availH, fw = fh * BOARD_W / BOARD_H;
+  if (fw > availW) { fw = availW; fh = fw * BOARD_H / BOARD_W; }
+  const x = (W - fw) / 2, y = topPad + (availH - fh) / 2;
+  frameRect = { x, y, w: fw, h: fh };
+  const c = frame.children;
+  const o = 2;
+  c[0].style.cssText = `left:${x - o}px;top:${y - o}px`;
+  c[1].style.cssText = `left:${x + fw - 44 + o}px;top:${y - o}px`;
+  c[2].style.cssText = `left:${x - o}px;top:${y + fh - 44 + o}px`;
+  c[3].style.cssText = `left:${x + fw - 44 + o}px;top:${y + fh - 44 + o}px`;
+  mask.width = W; mask.height = H;
+  const g = mask.getContext('2d');
+  g.clearRect(0, 0, W, H);
+  g.fillStyle = 'rgba(0,0,0,0.55)';
+  g.fillRect(0, 0, W, H);
+  g.clearRect(x, y, fw, fh);
+}
+addEventListener('resize', layout);
+layout();
+
+/* Map the on-screen frame to video pixels (video uses object-fit: cover). */
+function frameInVideo(margin = 0) {
+  const vw = video.videoWidth, vh = video.videoHeight, W = innerWidth, H = innerHeight;
+  const scale = Math.max(W / vw, H / vh);
+  const ox = (W - vw * scale) / 2, oy = (H - vh * scale) / 2;
+  const mx = frameRect.w * margin, my = frameRect.h * margin;
+  let sx = (frameRect.x - mx - ox) / scale, sy = (frameRect.y - my - oy) / scale;
+  let sw = (frameRect.w + 2 * mx) / scale, sh = (frameRect.h + 2 * my) / scale;
+  sx = Math.max(0, sx); sy = Math.max(0, sy);
+  sw = Math.min(vw - sx, sw); sh = Math.min(vh - sy, sh);
+  return { sx, sy, sw, sh };
+}
+
+/* --- Camera --- */
+async function start() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }
+    });
+  } catch (e) {
+    fail('Camera blocked. Allow camera access for this page in your browser settings, then reload.');
+    return;
+  }
+  video.srcObject = stream;
+  track = stream.getVideoTracks()[0];
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  if (caps.torch) {
+    const t = $('torch'); t.hidden = false; let on = false;
+    t.onclick = () => { on = !on; track.applyConstraints({ advanced: [{ torch: on }] }).catch(() => {}); };
+  }
+  await video.play().catch(() => {});
+  requestAnimationFrame(loop);
+}
+
+/* --- Sharpness: variance of the Laplacian on a small grey copy of the frame area --- */
+const probe = document.createElement('canvas');
+const pctx = probe.getContext('2d', { willReadFrequently: true });
+let lastGrey = null, lastCheck = 0;
+function measure() {
+  const r = frameInVideo(0);
+  const PW = 120, PH = Math.round(PW * r.sh / r.sw);
+  probe.width = PW; probe.height = PH;
+  pctx.drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, PW, PH);
+  const d = pctx.getImageData(0, 0, PW, PH).data;
+  const grey = new Float32Array(PW * PH);
+  for (let i = 0; i < grey.length; i++) grey[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  let sum = 0, sum2 = 0, n = 0, motion = 0, bright = 0;
+  for (let y = 1; y < PH - 1; y++) for (let x = 1; x < PW - 1; x++) {
+    const i = y * PW + x;
+    const lap = grey[i - 1] + grey[i + 1] + grey[i - PW] + grey[i + PW] - 4 * grey[i];
+    sum += lap; sum2 += lap * lap; n++;
+  }
+  for (let i = 0; i < grey.length; i++) {
+    bright += grey[i];
+    if (lastGrey) motion += Math.abs(grey[i] - lastGrey[i]);
+  }
+  lastGrey = grey;
+  const mean = sum / n;
+  return { sharp: Math.sqrt(sum2 / n - mean * mean), motion: lastGrey ? motion / grey.length : 99, bright: bright / grey.length };
+}
+
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls; }
+
+function loop(t) {
+  if (!captured && video.readyState >= 2 && t - lastCheck > 200) {
+    lastCheck = t;
+    const m = measure();
+    let ok = false;
+    if (m.bright < 45) setStatus('Too dark — turn on lights or the torch', 'bad');
+    else if (m.bright > 235) setStatus('Too bright — avoid glare', 'bad');
+    else if (m.motion > 6) setStatus('Hold the phone still', 'warn');
+    else if (m.sharp < SHARP_MIN) setStatus('Blurry — hold steady, tap the screen to focus', 'warn');
+    else { ok = true; }
+    sharpStreak = ok ? sharpStreak + 1 : 0;
+    const ready = sharpStreak >= 3; // ~0.6 s steady and sharp
+    if (ready) setStatus('Sharp ✓  Check all 4 corners are inside, then tap', 'ok');
+    shutter.disabled = !ready;
+    document.body.classList.toggle('sharp', ready);
+  }
+  requestAnimationFrame(loop);
+}
+
+/* Tap to focus (where the browser supports it). */
+video.addEventListener('click', () => {
+  if (track && track.applyConstraints) track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] }).catch(() => {});
+});
+
+/* --- Capture the frame area (+5% margin so the board edges are kept) --- */
+shutter.addEventListener('click', () => {
+  const r = frameInVideo(0.05);
+  const maxH = 2400, scale = Math.min(1, maxH / r.sh);
+  const c = document.createElement('canvas');
+  c.width = Math.round(r.sw * scale); c.height = Math.round(r.sh * scale);
+  c.getContext('2d').drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, c.width, c.height);
+  captured = c.toDataURL('image/jpeg', 0.88);
+  $('still').src = captured;
+  $('result').textContent = 'Check that all 4 corners of the board are in the photo.';
+  $('result').className = '';
+  $('use').disabled = false; $('use').textContent = 'Use photo';
+  $('review').classList.add('on');
+});
+
+$('retake').addEventListener('click', () => {
+  captured = null; sharpStreak = 0;
+  $('review').classList.remove('on');
+});
+
+/* --- Upload to the Apps Script endpoint, which saves the photo and runs the AI check --- */
+$('use').addEventListener('click', async () => {
+  const useBtn = $('use'), res = $('result');
+  useBtn.disabled = true; useBtn.textContent = 'Checking…';
+  res.className = ''; res.textContent = 'Uploading and checking the photo (about 10 seconds)…';
+  try {
+    const r = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // avoids a CORS preflight
+      body: JSON.stringify({ token: TOKEN, id: rowId, image: captured.split(',')[1] })
+    });
+    const out = await r.json();
+    if (out.error) throw new Error(out.error);
+    if (out.status === 'Approved') {
+      res.className = 'ok';
+      res.textContent = 'Approved ✓  Photo saved. Go back to the app and sync.';
+      useBtn.textContent = 'Done';
+      useBtn.disabled = false;
+      useBtn.onclick = () => { if (back) location.href = back; else history.back(); };
+    } else if (out.status === 'Rejected') {
+      res.className = 'bad';
+      res.textContent = 'Rejected: ' + (out.issue || 'board not complete or not clear') + '. Please retake.';
+      useBtn.textContent = 'Use photo';
+    } else {
+      res.className = 'bad';
+      res.textContent = 'Saved, but not checked: ' + (out.issue || 'unknown error');
+      useBtn.textContent = 'Use photo'; useBtn.disabled = false;
+    }
+  } catch (e) {
+    res.className = 'bad';
+    res.textContent = 'Upload failed: ' + e.message + '. Check your connection and try again.';
+    useBtn.textContent = 'Try again'; useBtn.disabled = false;
+  }
+});
+
+if (rowId) start();
+</script>
+</body>
+</html>
